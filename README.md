@@ -15,6 +15,7 @@ A collection of Bash scripts for setting up, managing, and auditing **AWS Disast
   - [dr-cleanup.sh](#dr-cleanupsh)
   - [dr-inventory.sh](#dr-inventorysh)
   - [dr-migration-status.sh](#dr-migration-statussh)
+  - [dr-serverless-migrate.sh](#dr-serverless-migratesh)
   - [rds-cross-region-replica.sh](#rds-cross-region-replicash)
   - [s3-cross-region-backup.sh](#s3-cross-region-backupsh)
 - [IAM Permissions](#iam-permissions)
@@ -33,8 +34,9 @@ These scripts help you build and manage a cross-region DR strategy on AWS:
 | `dr-create-backup-plan.sh` | Create a daily AWS Backup plan with cross-region DR copy |
 | `dr-backup-exclude.sh` | Exclude tagged instances from backup selections |
 | `dr-cleanup.sh` | Remove backups of stopped EC2 instances; release unattached EIPs |
-| `dr-inventory.sh` | Generate a full resource inventory report for a region |
+| `dr-inventory.sh` | Generate a full resource inventory report for a region (EC2, RDS, S3, Lambda, DynamoDB, API Gateway, EKS, SQS, SNS, KMS, and more) |
 | `dr-migration-status.sh` | Check overall DR readiness across all services |
+| `dr-serverless-migrate.sh` | Migrate DynamoDB, Lambda, and API Gateway resources to the DR region |
 | `rds-cross-region-replica.sh` | Create cross-region read replicas for RDS instances |
 | `s3-cross-region-backup.sh` | Set up S3 cross-region replication and sync |
 
@@ -126,7 +128,7 @@ Identifies and removes wasteful AWS Backup jobs targeting stopped EC2 instances,
 
 ### dr-inventory.sh
 
-Scans a region and generates a comprehensive, timestamped inventory report covering VPCs, EC2 instances, RDS databases, S3 buckets, ELBs, ECS, Lambda, ECR, CloudFront, Route 53, ACM certificates, IAM, Secrets Manager, and more.
+Scans a region and generates a comprehensive, timestamped inventory report covering VPCs, EC2 instances, RDS databases, S3 buckets, ELBs, Lambda functions, API Gateway, DynamoDB, ECS, EKS, ECR, SQS, SNS, ACM certificates, Secrets Manager, SSM Parameter Store, WAF, and KMS keys.
 
 **Documentation:** [docs/dr-inventory.md](docs/dr-inventory.md)
 
@@ -146,6 +148,35 @@ Checks the overall DR readiness of your AWS account by scanning AWS Backup plans
 
 ```bash
 ./dr-migration-status.sh --region me-south-1 --dr-region eu-west-1
+```
+
+---
+
+### dr-serverless-migrate.sh
+
+Audits and migrates serverless resources — DynamoDB tables (via Global Tables), Lambda functions and layers, and API Gateway REST/HTTP APIs — from the source region to the DR region.
+
+**Documentation:** [docs/dr-serverless-migrate.md](docs/dr-serverless-migrate.md)
+
+```bash
+# Audit serverless resources (read-only)
+./dr-serverless-migrate.sh audit
+
+# Enable DynamoDB Global Tables (dry-run preview)
+SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 \
+  ./dr-serverless-migrate.sh dynamodb --dry-run
+
+# Deploy Lambda functions to DR region
+SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 \
+  ./dr-serverless-migrate.sh lambda --skip-deprecated
+
+# Migrate API Gateway to DR region
+SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 \
+  ./dr-serverless-migrate.sh apigateway --dry-run
+
+# Clean up orphaned API Gateway integrations
+SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 \
+  ./dr-serverless-migrate.sh cleanup
 ```
 
 ---
@@ -190,6 +221,9 @@ The IAM principal running these scripts needs permissions across several service
 | S3 | `s3:*` (list buckets, get/put configuration, replication, sync) |
 | IAM | `iam:CreateRole`, `iam:AttachRolePolicy`, `iam:GetRole`, `iam:PassRole` |
 | KMS | `kms:CreateKey`, `kms:DescribeKey`, `kms:CreateAlias` (for encrypted RDS) |
+| DynamoDB | `dynamodb:ListTables`, `dynamodb:DescribeTable`, `dynamodb:UpdateTable` (for Global Tables) |
+| Lambda | `lambda:ListFunctions`, `lambda:GetFunction`, `lambda:CreateFunction`, `lambda:ListLayers`, `lambda:PublishLayerVersion` |
+| API Gateway | `apigateway:GET`, `apigateway:POST`, `apigatewayv2:*` |
 | STS | `sts:GetCallerIdentity` |
 
 For least-privilege setups, refer to each script's individual documentation in the `docs/` directory.
@@ -232,12 +266,20 @@ For least-privilege setups, refer to each script's individual documentation in t
    SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 ./rds-cross-region-replica.sh
    ```
 
-7. **Set up S3 cross-region replication**
+7. **Migrate serverless resources (DynamoDB, Lambda, API Gateway)**
+   ```bash
+   SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 ./dr-serverless-migrate.sh audit
+   SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 ./dr-serverless-migrate.sh dynamodb
+   SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 ./dr-serverless-migrate.sh lambda
+   SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 ./dr-serverless-migrate.sh apigateway
+   ```
+
+8. **Set up S3 cross-region replication**
    ```bash
    SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 ./s3-cross-region-backup.sh
    ```
 
-8. **Verify overall DR readiness**
+9. **Verify overall DR readiness**
    ```bash
    ./dr-migration-status.sh --region me-south-1 --dr-region eu-west-1
    ```
