@@ -43,22 +43,18 @@ All output is simultaneously printed to the terminal and written to the report f
 
 | Section | Resources |
 |---------|-----------|
-| **1. VPC & Networking** | VPCs, Subnets, Security Groups, Route Tables, Internet Gateways, NAT Gateways |
-| **2. EC2 Instances** | All instances with state, type, name, key pair, and private IP |
-| **3. EBS Volumes** | All volumes with state, size, type, encryption status |
-| **4. Elastic IPs** | All EIPs with association status |
-| **5. RDS Databases** | DB instances with engine, class, storage, MultiAZ, encryption |
-| **6. S3 Buckets** | All buckets with region, versioning, replication, and encryption status |
-| **7. Load Balancers** | ALBs, NLBs (v2), and classic ELBs |
-| **8. ECS** | Clusters and running task/service counts |
-| **9. Lambda** | Functions with runtime and memory |
-| **10. ECR** | Container repositories |
-| **11. CloudFront** | Distributions with origin and status |
-| **12. Route 53** | Hosted zones and record set counts |
-| **13. ACM Certificates** | SSL/TLS certificates with domain, status, and expiry |
-| **14. IAM** | Users, groups, roles, policies (summary counts) |
-| **15. Secrets Manager** | Secret names (not values) |
-| **16. AWS Backup** | Backup plans, selections, and vaults |
+| **1. VPC & Networking** | VPCs, Subnets, Security Groups, NACLs, Route Tables, Internet Gateways, NAT Gateways |
+| **2. Elastic IPs** | All EIPs with allocation and association status |
+| **3. EC2 Instances & Auto Scaling** | Instances, AMIs, EBS volumes, EBS snapshots, Launch Templates, Auto Scaling Groups, Scaling Policies |
+| **4. Load Balancers & Target Groups** | ALBs, NLBs, classic ELBs, Target Groups |
+| **5. S3 Buckets** | Buckets in the scanned region with object count, size, versioning, and replication status |
+| **6. RDS Instances** | DB instances, Read Replicas, Subnet Groups, Automated Backups, Parameter Groups |
+| **7. Lambda Functions** | Functions with runtime, memory, timeout, and code size; Lambda Layers; Event Source Mappings |
+| **8. API Gateway** | REST APIs, HTTP APIs (v2), Custom Domain Names |
+| **9. DynamoDB Tables** | Tables with status, item count, size, billing mode, and Global Table version |
+| **10. ECS / EKS / ECR** | ECS Clusters, ECS Services, ECS Task Definitions, EKS Clusters, ECR Repositories, ECR replication config |
+| **11. SQS & SNS** | SQS queues with visibility/retention settings; SNS topics with subscription counts |
+| **12. Security & Config Services** | ACM certificates, Secrets Manager secrets, SSM Parameter Store, WAF Web ACLs, IAM instance profiles, customer-managed KMS keys |
 
 ## IAM Permissions Required
 
@@ -69,30 +65,49 @@ The script performs **read-only** operations. Required permissions include:
   "Effect": "Allow",
   "Action": [
     "ec2:Describe*",
-    "rds:DescribeDBInstances",
+    "autoscaling:DescribeAutoScalingGroups",
+    "autoscaling:DescribePolicies",
+    "elasticloadbalancing:DescribeLoadBalancers",
+    "elasticloadbalancing:DescribeTargetGroups",
     "s3:ListAllMyBuckets",
     "s3:GetBucketLocation",
     "s3:GetBucketVersioning",
     "s3:GetBucketReplication",
-    "s3:GetBucketEncryption",
-    "elasticloadbalancing:DescribeLoadBalancers",
-    "ecs:ListClusters",
-    "ecs:DescribeClusters",
+    "s3:ListBucket",
+    "rds:DescribeDBInstances",
+    "rds:DescribeDBSubnetGroups",
+    "rds:DescribeDBInstanceAutomatedBackups",
+    "rds:DescribeDBParameterGroups",
     "lambda:ListFunctions",
+    "lambda:ListLayers",
+    "lambda:ListEventSourceMappings",
+    "apigateway:GET",
+    "apigatewayv2:GetApis",
+    "apigatewayv2:GetIntegrations",
+    "apigatewayv2:GetRoutes",
+    "dynamodb:ListTables",
+    "dynamodb:DescribeTable",
+    "ecs:ListClusters",
+    "ecs:ListServices",
+    "ecs:DescribeServices",
+    "ecs:ListTasks",
+    "ecs:ListTaskDefinitionFamilies",
+    "eks:ListClusters",
+    "eks:DescribeCluster",
     "ecr:DescribeRepositories",
-    "cloudfront:ListDistributions",
-    "route53:ListHostedZones",
-    "route53:GetHostedZone",
+    "ecr:ListImages",
+    "ecr:DescribeRegistry",
+    "sqs:ListQueues",
+    "sqs:GetQueueAttributes",
+    "sns:ListTopics",
+    "sns:ListSubscriptionsByTopic",
     "acm:ListCertificates",
-    "acm:DescribeCertificate",
-    "iam:ListUsers",
-    "iam:ListGroups",
-    "iam:ListRoles",
-    "iam:ListPolicies",
     "secretsmanager:ListSecrets",
-    "backup:ListBackupPlans",
-    "backup:ListBackupSelections",
-    "backup:ListBackupVaults",
+    "ssm:DescribeParameters",
+    "wafv2:ListWebACLs",
+    "iam:ListInstanceProfiles",
+    "kms:ListKeys",
+    "kms:DescribeKey",
     "sts:GetCallerIdentity",
     "iam:ListAccountAliases",
     "organizations:DescribeAccount"
@@ -105,5 +120,8 @@ The script performs **read-only** operations. Required permissions include:
 
 - The script is entirely **read-only** — it makes no changes to any AWS resources.
 - Secret **values** are never retrieved; only secret names are listed.
+- SSM Parameter Store parameter values are never retrieved; only names, types, and versions are listed.
+- S3 bucket listings may take extra time for buckets with large numbers of objects.
+- EBS snapshots and AMIs are limited to the 20 most recent entries to keep the report concise.
 - The report file can be used as a baseline before a DR migration, for compliance audits, or for cost reviews.
 - For large accounts, the scan may take several minutes depending on the number of resources.
