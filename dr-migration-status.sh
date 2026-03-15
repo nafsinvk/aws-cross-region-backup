@@ -8,14 +8,19 @@ set -euo pipefail
 # of disaster recovery migration for the current account.
 #
 # Checks:
-#   1. AWS Backup plans (existence, DR copy rules, recovery points)
-#   2. DR Backup Vault in DR region (existence, recovery points)
-#   3. S3 Cross-Region Replication (per-bucket CRR status)
-#   4. RDS Cross-Region Read Replicas
-#   5. ECR Cross-Region Replication
-#   6. EC2 instances backup coverage
-#   7. Route 53 / DNS failover readiness
-#   8. ACM certificates in DR region
+#   1. EC2 instances backup coverage
+#   2. AWS Backup plans (existence, DR copy rules, recovery points)
+#   3. DR Backup Vault in DR region (existence, recovery points)
+#   4. S3 Cross-Region Replication (per-bucket CRR status)
+#   5. RDS Cross-Region Read Replicas
+#   6. ECR/ECS Cross-Region Replication
+#   7. DynamoDB Global Tables
+#   8. Lambda Functions (existence in DR, deprecated runtimes)
+#   9. API Gateway (REST + HTTP APIs in DR)
+#  10. DR Region Infrastructure (VPCs, instances, LBs)
+#  11. ACM certificates in DR region
+#  12. Route 53 / DNS failover readiness
+#  13. KMS keys in DR region
 #
 # Usage:
 #   ./dr-migration-status.sh
@@ -594,9 +599,203 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# 7. DR REGION INFRASTRUCTURE
+# 7. DYNAMODB TABLES & GLOBAL TABLES
 # ════════════════════════════════════════════════════════════
-log_step "7. DR REGION INFRASTRUCTURE ($DEST_REGION)"
+log_step "7. DYNAMODB TABLES & GLOBAL TABLES"
+
+echo -e "\n  ${BOLD}DynamoDB Tables ($SOURCE_REGION):${NC}"
+DDB_TABLES=$(aws dynamodb list-tables --region "$SOURCE_REGION" \
+    --query 'TableNames[]' --output text 2>/dev/null || echo "")
+
+ddb_total=0
+ddb_global=0
+ddb_no_global=0
+DDB_TABLE_NAMES=()
+if [[ -n "$DDB_TABLES" && "$DDB_TABLES" != "None" ]]; then
+    for table in $DDB_TABLES; do
+        inc ddb_total
+        DDB_TABLE_NAMES+=("$table")
+        # Check if it's a Global Table with replica in DR region
+        replicas=$(aws dynamodb describe-table --region "$SOURCE_REGION" --table-name "$table" \
+            --query 'Table.Replicas[].RegionName' --output text 2>/dev/null || echo "")
+        billing=$(aws dynamodb describe-table --region "$SOURCE_REGION" --table-name "$table" \
+            --query 'Table.BillingModeSummary.BillingMode' --output text 2>/dev/null || echo "PROVISIONED")
+        has_dr=false
+        if [[ -n "$replicas" && "$replicas" != "None" ]]; then
+            for rep_region in $replicas; do
+                if [[ "$rep_region" == "$DEST_REGION" ]]; then
+                    has_dr=true
+                    break
+                fi
+            done
+        fi
+        if $has_dr; then
+            status_ok "$table | Billing: $billing | Global Table replica in $DEST_REGION"
+            inc ddb_global
+        else
+            status_fail "$table | Billing: $billing | No replica in $DEST_REGION"
+            inc ddb_no_global
+        fi
+    done
+    echo ""
+    echo "    Tables: $ddb_total | Global Table (DR): $ddb_global | No replica: $ddb_no_global"
+    if [[ $ddb_no_global -eq 0 && $ddb_total -gt 0 ]]; then
+        status_ok "All DynamoDB tables have Global Table replicas in $DEST_REGION"
+        record_pass
+    elif [[ $ddb_global -gt 0 ]]; then
+        status_warn "$ddb_global of $ddb_total tables have Global Table replicas"
+        record_warn
+    else
+        status_fail "No DynamoDB tables have Global Table replicas"
+        record_fail
+    fi
+else
+    echo "    (none)"
+    status_skip "No DynamoDB tables in $SOURCE_REGION"
+fi
+
+# ════════════════════════════════════════════════════════════
+# 8. LAMBDA FUNCTIONS
+# ════════════════════════════════════════════════════════════
+log_step "8. LAMBDA FUNCTIONS"
+
+echo -e "\n  ${BOLD}Lambda Functions ($SOURCE_REGION):${NC}"
+LAMBDA_FUNCS=$(aws lambda list-functions --region "$SOURCE_REGION" \
+    --query 'Functions[].[FunctionName,Runtime,PackageType]' \
+    --output text 2>/dev/null || echo "")
+
+lambda_total=0
+lambda_deprecated=0
+lambda_in_dr=0
+lambda_not_in_dr=0
+LAMBDA_NAMES=()
+
+is_deprecated_runtime() {
+    local runtime="$1"
+    case "$runtime" in
+        nodejs14.x|nodejs16.x|python3.7|python3.8|dotnetcore3.1|ruby2.7|java8|go1.x)
+            return 0 ;;
+        *)  return 1 ;;
+    esac
+}
+
+if [[ -n "$LAMBDA_FUNCS" && "$LAMBDA_FUNCS" != "None" ]]; then
+    while IFS=$'\t' read -r fname fruntime fpkg; do
+        inc lambda_total
+        LAMBDA_NAMES+=("$fname")
+
+        # Check if function exists in DR region
+        dr_exists=$(aws lambda get-function --region "$DEST_REGION" --function-name "$fname" \
+            --query 'Configuration.FunctionName' --output text 2>/dev/null || echo "")
+
+        deprecated_flag=""
+        if [[ "$fruntime" != "None" && "$fruntime" != "null" ]] && is_deprecated_runtime "$fruntime"; then
+            deprecated_flag=" [DEPRECATED RUNTIME]"
+            inc lambda_deprecated
+        fi
+
+        if [[ -n "$dr_exists" && "$dr_exists" != "None" ]]; then
+            status_ok "$fname | $fruntime | $fpkg | In DR$deprecated_flag"
+            inc lambda_in_dr
+        else
+            status_fail "$fname | $fruntime | $fpkg | NOT in DR$deprecated_flag"
+            inc lambda_not_in_dr
+        fi
+    done <<< "$LAMBDA_FUNCS"
+
+    echo ""
+    echo "    Functions: $lambda_total | In DR: $lambda_in_dr | Not in DR: $lambda_not_in_dr | Deprecated runtime: $lambda_deprecated"
+    if [[ $lambda_not_in_dr -eq 0 && $lambda_total -gt 0 ]]; then
+        status_ok "All Lambda functions exist in $DEST_REGION"
+        record_pass
+    elif [[ $lambda_in_dr -gt 0 ]]; then
+        status_warn "$lambda_in_dr of $lambda_total functions exist in $DEST_REGION"
+        record_warn
+    else
+        status_fail "No Lambda functions exist in $DEST_REGION"
+        record_fail
+    fi
+else
+    echo "    (none)"
+    status_skip "No Lambda functions in $SOURCE_REGION"
+fi
+
+# ════════════════════════════════════════════════════════════
+# 9. API GATEWAY
+# ════════════════════════════════════════════════════════════
+log_step "9. API GATEWAY"
+
+echo -e "\n  ${BOLD}REST APIs ($SOURCE_REGION):${NC}"
+REST_APIS=$(aws apigateway get-rest-apis --region "$SOURCE_REGION" \
+    --query 'items[].[id,name]' --output text 2>/dev/null || echo "")
+
+apigw_rest_total=0
+apigw_rest_in_dr=0
+if [[ -n "$REST_APIS" && "$REST_APIS" != "None" ]]; then
+    while IFS=$'\t' read -r api_id api_name; do
+        inc apigw_rest_total
+        # Check if same-named REST API exists in DR
+        dr_match=$(aws apigateway get-rest-apis --region "$DEST_REGION" \
+            --query "items[?name=='$api_name'].name | [0]" --output text 2>/dev/null || echo "")
+        if [[ -n "$dr_match" && "$dr_match" != "None" ]]; then
+            status_ok "$api_name (REST) | In DR"
+            inc apigw_rest_in_dr
+        else
+            status_fail "$api_name (REST) | NOT in DR"
+        fi
+    done <<< "$REST_APIS"
+else
+    echo "    (none)"
+fi
+
+echo -e "\n  ${BOLD}HTTP APIs ($SOURCE_REGION):${NC}"
+HTTP_APIS=$(aws apigatewayv2 get-apis --region "$SOURCE_REGION" \
+    --query 'Items[].[ApiId,Name,ProtocolType]' --output text 2>/dev/null || echo "")
+
+apigw_http_total=0
+apigw_http_in_dr=0
+if [[ -n "$HTTP_APIS" && "$HTTP_APIS" != "None" ]]; then
+    while IFS=$'\t' read -r api_id api_name proto; do
+        inc apigw_http_total
+        # Check if same-named HTTP API exists in DR
+        dr_match=$(aws apigatewayv2 get-apis --region "$DEST_REGION" \
+            --query "Items[?Name=='$api_name'].Name | [0]" --output text 2>/dev/null || echo "")
+        if [[ -n "$dr_match" && "$dr_match" != "None" ]]; then
+            status_ok "$api_name ($proto) | In DR"
+            inc apigw_http_in_dr
+        else
+            status_fail "$api_name ($proto) | NOT in DR"
+        fi
+    done <<< "$HTTP_APIS"
+else
+    echo "    (none)"
+fi
+
+apigw_total=$((apigw_rest_total + apigw_http_total))
+apigw_in_dr=$((apigw_rest_in_dr + apigw_http_in_dr))
+apigw_not_in_dr=$((apigw_total - apigw_in_dr))
+
+echo ""
+if [[ $apigw_total -gt 0 ]]; then
+    echo "    APIs: $apigw_total (REST: $apigw_rest_total, HTTP: $apigw_http_total) | In DR: $apigw_in_dr | Not in DR: $apigw_not_in_dr"
+    if [[ $apigw_not_in_dr -eq 0 ]]; then
+        status_ok "All API Gateway APIs exist in $DEST_REGION"
+        record_pass
+    elif [[ $apigw_in_dr -gt 0 ]]; then
+        status_warn "$apigw_in_dr of $apigw_total APIs exist in $DEST_REGION"
+        record_warn
+    else
+        status_fail "No API Gateway APIs exist in $DEST_REGION"
+        record_fail
+    fi
+else
+    status_skip "No API Gateway APIs in $SOURCE_REGION"
+fi
+
+# ════════════════════════════════════════════════════════════
+# 10. DR REGION INFRASTRUCTURE
+# ════════════════════════════════════════════════════════════
+log_step "10. DR REGION INFRASTRUCTURE ($DEST_REGION)"
 
 echo -e "\n  ${BOLD}VPCs in DR Region:${NC}"
 DR_VPCS=$(aws ec2 describe-vpcs --region "$DEST_REGION" \
@@ -649,9 +848,9 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# 8. ACM CERTIFICATES IN DR REGION
+# 11. ACM CERTIFICATES IN DR REGION
 # ════════════════════════════════════════════════════════════
-log_step "8. ACM CERTIFICATES"
+log_step "11. ACM CERTIFICATES"
 
 echo -e "\n  ${BOLD}Source Region ($SOURCE_REGION):${NC}"
 SRC_CERTS=$(aws acm list-certificates --region "$SOURCE_REGION" \
@@ -715,9 +914,9 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# 9. ROUTE 53 DNS
+# 12. ROUTE 53 DNS
 # ════════════════════════════════════════════════════════════
-log_step "9. ROUTE 53 DNS"
+log_step "12. ROUTE 53 DNS"
 
 HOSTED_ZONES=$(aws route53 list-hosted-zones \
     --query 'HostedZones[].[Id,Name,Config.PrivateZone,ResourceRecordSetCount]' \
@@ -769,9 +968,9 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# 10. KMS KEYS IN DR REGION
+# 13. KMS KEYS IN DR REGION
 # ════════════════════════════════════════════════════════════
-log_step "10. KMS KEYS IN DR REGION ($DEST_REGION)"
+log_step "13. KMS KEYS IN DR REGION ($DEST_REGION)"
 
 DR_KMS_KEYS=$(aws kms list-keys --region "$DEST_REGION" \
     --query 'Keys[].KeyId' --output text 2>/dev/null || echo "")
@@ -814,6 +1013,9 @@ echo "    Stopped EC2 instances    : $STOPPED_COUNT (tagged: $STOPPED_TAGGED)"
 echo "    S3 buckets (source)      : $s3_total"
 echo "    RDS instances (primary)  : $rds_total"
 echo "    ECR repositories         : $ecr_count"
+echo "    DynamoDB tables          : $ddb_total"
+echo "    Lambda functions         : $lambda_total"
+echo "    API Gateway APIs         : $apigw_total (REST: $apigw_rest_total, HTTP: $apigw_http_total)"
 echo "    ACM certificates (source): $src_cert_count"
 echo "    Route 53 hosted zones    : $r53_zones"
 
@@ -863,6 +1065,48 @@ elif [[ $ecr_count -gt 0 ]]; then
     status_warn "ECR Replication: Not configured"
 else
     status_skip "ECR Replication: N/A"
+fi
+
+# DynamoDB
+if [[ $ddb_total -gt 0 ]]; then
+    if [[ $ddb_no_global -eq 0 ]]; then
+        status_ok "DynamoDB Global Tables: $ddb_global of $ddb_total replicated"
+    elif [[ $ddb_global -gt 0 ]]; then
+        status_warn "DynamoDB Global Tables: $ddb_global of $ddb_total replicated"
+    else
+        status_fail "DynamoDB Global Tables: None replicated"
+    fi
+else
+    status_skip "DynamoDB: N/A (no tables)"
+fi
+
+# Lambda
+if [[ $lambda_total -gt 0 ]]; then
+    if [[ $lambda_not_in_dr -eq 0 ]]; then
+        status_ok "Lambda Functions: $lambda_in_dr of $lambda_total in DR"
+    elif [[ $lambda_in_dr -gt 0 ]]; then
+        status_warn "Lambda Functions: $lambda_in_dr of $lambda_total in DR"
+    else
+        status_fail "Lambda Functions: None in DR"
+    fi
+    if [[ $lambda_deprecated -gt 0 ]]; then
+        status_warn "Lambda Deprecated Runtimes: $lambda_deprecated function(s)"
+    fi
+else
+    status_skip "Lambda: N/A (no functions)"
+fi
+
+# API Gateway
+if [[ $apigw_total -gt 0 ]]; then
+    if [[ $apigw_not_in_dr -eq 0 ]]; then
+        status_ok "API Gateway: $apigw_in_dr of $apigw_total in DR"
+    elif [[ $apigw_in_dr -gt 0 ]]; then
+        status_warn "API Gateway: $apigw_in_dr of $apigw_total in DR"
+    else
+        status_fail "API Gateway: None in DR"
+    fi
+else
+    status_skip "API Gateway: N/A (no APIs)"
 fi
 
 # DNS
@@ -921,6 +1165,18 @@ if [[ $fail_checks -gt 0 || $warn_checks -gt 0 ]]; then
     fi
     if [[ $rds_no_replica -gt 0 ]]; then
         echo "    - Create RDS replicas: ./scripts/rds-cross-region-replica.sh"
+    fi
+    if [[ $ddb_no_global -gt 0 ]]; then
+        echo "    - Migrate DynamoDB Global Tables: ./scripts/dr-serverless-migrate.sh dynamodb"
+    fi
+    if [[ $lambda_not_in_dr -gt 0 ]]; then
+        echo "    - Migrate Lambda functions: ./scripts/dr-serverless-migrate.sh lambda"
+    fi
+    if [[ $lambda_deprecated -gt 0 ]]; then
+        echo "    - Upgrade $lambda_deprecated deprecated Lambda runtime(s) before migration"
+    fi
+    if [[ $apigw_not_in_dr -gt 0 ]]; then
+        echo "    - Migrate API Gateway APIs: ./scripts/dr-serverless-migrate.sh apigateway"
     fi
     if [[ $r53_failover -eq 0 && $r53_zones -gt 0 ]]; then
         echo "    - Configure DNS failover routing in Route 53 (Phase 6)"
