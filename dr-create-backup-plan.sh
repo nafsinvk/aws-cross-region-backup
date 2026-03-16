@@ -76,7 +76,7 @@ separator() {
 
 # ─── Validate Inputs ─────────────────────────────────────────────────────────
 if [[ -z "$INSTANCE_IDS" ]]; then
-    error "Missing --instance-ids. Example: --instance-ids \"i-007b4e0b4f2a0c823 i-076b835c6bc7770e3\""
+    error "Missing --instance-ids. Example: --instance-ids \"i-1234567890abcdef0 i-0987654321fedcba0\""
 fi
 if [[ -z "$PLAN_NAME" ]]; then
     error "Missing --plan-name. Example: --plan-name \"DailyBackupToIreland\""
