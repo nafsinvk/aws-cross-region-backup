@@ -186,3 +186,4 @@ The following Lambda runtimes are flagged as deprecated and a suggested upgrade 
 - DynamoDB Global Tables require DynamoDB Streams to be enabled. The script enables streams automatically if needed.
 - REST API export/import migrates the API structure only; authorizers, custom domain mappings, and stage variables may need manual reconfiguration.
 - Run `audit` first to understand what exists before running migration commands.
+- **Terminal input fix** — confirmation prompts (`read -rp`) inside loops that iterate over here-strings (e.g. the API Gateway REST API loop) explicitly read from `/dev/tty`. This ensures the prompt is displayed correctly and user input is captured from the terminal rather than from the loop's data stream, preventing every item from being silently skipped.

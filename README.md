@@ -18,6 +18,7 @@ A collection of Bash scripts for setting up, managing, and auditing **AWS Disast
   - [dr-serverless-migrate.sh](#dr-serverless-migratesh)
   - [rds-cross-region-replica.sh](#rds-cross-region-replicash)
   - [s3-cross-region-backup.sh](#s3-cross-region-backupsh)
+  - [s3-cross-region-backup-v2.sh](#s3-cross-region-backup-v2sh)
 - [IAM Permissions](#iam-permissions)
 - [Recommended Workflow](#recommended-workflow)
 - [Default Region Configuration](#default-region-configuration)
@@ -39,6 +40,7 @@ These scripts help you build and manage a cross-region DR strategy on AWS:
 | `dr-serverless-migrate.sh` | Migrate DynamoDB, Lambda, and API Gateway resources to the DR region |
 | `rds-cross-region-replica.sh` | Create cross-region read replicas for RDS instances |
 | `s3-cross-region-backup.sh` | Set up S3 cross-region replication and sync |
+| `s3-cross-region-backup-v2.sh` | Enhanced interactive S3 cross-region replication with bucket selection, configuration mirroring, and per-bucket confirmation |
 
 ---
 
@@ -205,6 +207,18 @@ Discovers S3 buckets in the source region, creates corresponding backup buckets 
 
 ```bash
 SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 ./s3-cross-region-backup.sh
+```
+
+---
+
+### s3-cross-region-backup-v2.sh
+
+An enhanced interactive version of the S3 backup script. Discovers buckets in the source region, lets you choose which ones to replicate, mirrors all bucket configuration (versioning, encryption, policy, tags, lifecycle, Block Public Access), syncs existing objects, and sets up ongoing Cross-Region Replication rules.
+
+**Documentation:** [docs/s3-cross-region-backup-v2.md](docs/s3-cross-region-backup-v2.md)
+
+```bash
+SOURCE_REGION=me-south-1 DEST_REGION=eu-west-1 ./s3-cross-region-backup-v2.sh
 ```
 
 ---
