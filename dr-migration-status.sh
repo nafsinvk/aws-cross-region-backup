@@ -19,16 +19,18 @@ set -euo pipefail
 #   9. API Gateway (REST + HTTP APIs in DR)
 #  10. DR Region Infrastructure (VPCs, instances, LBs)
 #  11. ACM certificates in DR region
-#  12. Route 53 / DNS failover readiness
+#  12. Route 53 / DNS failover readiness (skipped if --dns-external)
 #  13. KMS keys in DR region
 #
 # Usage:
 #   ./dr-migration-status.sh
 #   ./dr-migration-status.sh --region me-south-1 --dr-region eu-west-1
+#   ./dr-migration-status.sh --dns-external    # DNS managed outside AWS (e.g. Cloudflare)
 # ============================================================
 
 SOURCE_REGION="${SOURCE_REGION:-me-south-1}"
 DEST_REGION="${DEST_REGION:-eu-west-1}"
+DNS_EXTERNAL=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -57,12 +59,14 @@ command -v jq >/dev/null 2>&1  || { log_error "jq not found."; exit 1; }
 # ── Parse arguments ────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --region)       SOURCE_REGION="$2"; shift 2 ;;
-        --dr-region)    DEST_REGION="$2"; shift 2 ;;
+        --region)        SOURCE_REGION="$2"; shift 2 ;;
+        --dr-region)     DEST_REGION="$2"; shift 2 ;;
+        --dns-external)  DNS_EXTERNAL=true; shift ;;
         -h|--help)
-            echo "Usage: $0 [--region SOURCE_REGION] [--dr-region DR_REGION]"
-            echo "  --region     Source region (default: me-south-1)"
-            echo "  --dr-region  DR region (default: eu-west-1)"
+            echo "Usage: $0 [--region SOURCE_REGION] [--dr-region DR_REGION] [--dns-external]"
+            echo "  --region        Source region (default: me-south-1)"
+            echo "  --dr-region     DR region (default: eu-west-1)"
+            echo "  --dns-external  DNS managed outside AWS (e.g. Cloudflare) — skips Route 53 failover check"
             exit 0 ;;
         *) log_error "Unknown argument: $1"; exit 1 ;;
     esac
@@ -918,53 +922,60 @@ fi
 # ════════════════════════════════════════════════════════════
 log_step "12. ROUTE 53 DNS"
 
-HOSTED_ZONES=$(aws route53 list-hosted-zones \
-    --query 'HostedZones[].[Id,Name,Config.PrivateZone,ResourceRecordSetCount]' \
-    --output text 2>/dev/null || echo "")
-
 r53_zones=0
 r53_failover=0
-if [[ -n "$HOSTED_ZONES" && "$HOSTED_ZONES" != "None" ]]; then
-    while IFS=$'\t' read -r zone_id zone_name is_private rr_count; do
-        inc r53_zones
-        zone_id_short=$(echo "$zone_id" | awk -F/ '{print $NF}')
-        echo "    - $zone_name | Records: $rr_count | Private: $is_private"
 
-        # Check for failover records
-        failover_records=$(aws route53 list-resource-record-sets \
-            --hosted-zone-id "$zone_id_short" \
-            --query 'ResourceRecordSets[?Failover!=`null`].[Name,Type,Failover,SetIdentifier]' \
-            --output text 2>/dev/null || echo "")
-        if [[ -n "$failover_records" && "$failover_records" != "None" ]]; then
-            while IFS=$'\t' read -r rr_name rr_type rr_failover rr_setid; do
-                echo "      Failover: $rr_name | $rr_type | $rr_failover | SetID: $rr_setid"
-                inc r53_failover
-            done <<< "$failover_records"
-        fi
-
-        # Check for health checks associated
-        health_records=$(aws route53 list-resource-record-sets \
-            --hosted-zone-id "$zone_id_short" \
-            --query 'ResourceRecordSets[?HealthCheckId!=`null`].[Name,Type,HealthCheckId]' \
-            --output text 2>/dev/null || echo "")
-        if [[ -n "$health_records" && "$health_records" != "None" ]]; then
-            while IFS=$'\t' read -r rr_name rr_type hc_id; do
-                echo "      Health-checked: $rr_name | $rr_type | HC: $hc_id"
-            done <<< "$health_records"
-        fi
-    done <<< "$HOSTED_ZONES"
-
-    echo ""
-    echo "    Hosted zones: $r53_zones | Failover records: $r53_failover"
-    if [[ $r53_failover -gt 0 ]]; then
-        status_ok "DNS failover routing is configured ($r53_failover records)"
-        record_pass
-    else
-        status_warn "No DNS failover routing configured (Phase 6 of DR plan)"
-        record_warn
-    fi
+if $DNS_EXTERNAL; then
+    echo "    DNS managed externally (outside AWS — e.g. Cloudflare)"
+    echo "    Route 53 failover check skipped"
+    status_skip "DNS Failover: N/A — DNS managed externally (manual failover via DNS provider)"
 else
-    echo "    (no hosted zones found — may need Route 53 permissions)"
+    HOSTED_ZONES=$(aws route53 list-hosted-zones \
+        --query 'HostedZones[].[Id,Name,Config.PrivateZone,ResourceRecordSetCount]' \
+        --output text 2>/dev/null || echo "")
+
+    if [[ -n "$HOSTED_ZONES" && "$HOSTED_ZONES" != "None" ]]; then
+        while IFS=$'\t' read -r zone_id zone_name is_private rr_count; do
+            inc r53_zones
+            zone_id_short=$(echo "$zone_id" | awk -F/ '{print $NF}')
+            echo "    - $zone_name | Records: $rr_count | Private: $is_private"
+
+            # Check for failover records
+            failover_records=$(aws route53 list-resource-record-sets \
+                --hosted-zone-id "$zone_id_short" \
+                --query 'ResourceRecordSets[?Failover!=`null`].[Name,Type,Failover,SetIdentifier]' \
+                --output text 2>/dev/null || echo "")
+            if [[ -n "$failover_records" && "$failover_records" != "None" ]]; then
+                while IFS=$'\t' read -r rr_name rr_type rr_failover rr_setid; do
+                    echo "      Failover: $rr_name | $rr_type | $rr_failover | SetID: $rr_setid"
+                    inc r53_failover
+                done <<< "$failover_records"
+            fi
+
+            # Check for health checks associated
+            health_records=$(aws route53 list-resource-record-sets \
+                --hosted-zone-id "$zone_id_short" \
+                --query 'ResourceRecordSets[?HealthCheckId!=`null`].[Name,Type,HealthCheckId]' \
+                --output text 2>/dev/null || echo "")
+            if [[ -n "$health_records" && "$health_records" != "None" ]]; then
+                while IFS=$'\t' read -r rr_name rr_type hc_id; do
+                    echo "      Health-checked: $rr_name | $rr_type | HC: $hc_id"
+                done <<< "$health_records"
+            fi
+        done <<< "$HOSTED_ZONES"
+
+        echo ""
+        echo "    Hosted zones: $r53_zones | Failover records: $r53_failover"
+        if [[ $r53_failover -gt 0 ]]; then
+            status_ok "DNS failover routing is configured ($r53_failover records)"
+            record_pass
+        else
+            status_warn "No DNS failover routing configured (Phase 6 of DR plan)"
+            record_warn
+        fi
+    else
+        echo "    (no hosted zones found — may need Route 53 permissions)"
+    fi
 fi
 
 # ════════════════════════════════════════════════════════════
@@ -1017,7 +1028,11 @@ echo "    DynamoDB tables          : $ddb_total"
 echo "    Lambda functions         : $lambda_total"
 echo "    API Gateway APIs         : $apigw_total (REST: $apigw_rest_total, HTTP: $apigw_http_total)"
 echo "    ACM certificates (source): $src_cert_count"
-echo "    Route 53 hosted zones    : $r53_zones"
+if $DNS_EXTERNAL; then
+    echo "    DNS management           : External (Cloudflare/other)"
+else
+    echo "    Route 53 hosted zones    : $r53_zones"
+fi
 
 echo ""
 echo -e "  ${BOLD}DR Status:${NC}"
@@ -1110,7 +1125,9 @@ else
 fi
 
 # DNS
-if [[ $r53_failover -gt 0 ]]; then
+if $DNS_EXTERNAL; then
+    status_skip "DNS Failover: N/A — managed externally"
+elif [[ $r53_failover -gt 0 ]]; then
     status_ok "DNS Failover: $r53_failover record(s)"
 else
     status_warn "DNS Failover: Not configured"
@@ -1178,7 +1195,9 @@ if [[ $fail_checks -gt 0 || $warn_checks -gt 0 ]]; then
     if [[ $apigw_not_in_dr -gt 0 ]]; then
         echo "    - Migrate API Gateway APIs: ./scripts/dr-serverless-migrate.sh apigateway"
     fi
-    if [[ $r53_failover -eq 0 && $r53_zones -gt 0 ]]; then
+    if $DNS_EXTERNAL; then
+        echo "    - DNS failover: Update records in external DNS provider (e.g. Cloudflare) during DR event"
+    elif [[ $r53_failover -eq 0 && $r53_zones -gt 0 ]]; then
         echo "    - Configure DNS failover routing in Route 53 (Phase 6)"
     fi
     if [[ $src_cert_count -gt 0 && $dr_cert_count -lt $src_cert_count ]]; then

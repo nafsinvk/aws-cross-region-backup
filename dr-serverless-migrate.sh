@@ -796,7 +796,7 @@ cmd_apigateway() {
                 continue
             fi
 
-            read -rp "    Export and import '$api_name' to $DEST_REGION? (y/n): " confirm
+            read -rp "    Export and import '$api_name' to $DEST_REGION? (y/n): " confirm < /dev/tty
             if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
                 log_warn "Skipping '$api_name'."
                 inc skipped
